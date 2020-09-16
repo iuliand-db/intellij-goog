@@ -41,6 +41,7 @@ import com.google.idea.blaze.base.sync.data.BlazeProjectDataManager;
 import com.google.idea.blaze.base.sync.libraries.LibrarySource;
 import com.google.idea.blaze.java.sync.JavaLanguageLevelHelper;
 import com.google.idea.blaze.java.sync.model.BlazeJarLibrary;
+import com.google.idea.common.experiments.BoolExperiment;
 import com.intellij.facet.FacetManager;
 import com.intellij.facet.ModifiableFacetModel;
 import com.intellij.openapi.application.ApplicationManager;
@@ -52,6 +53,7 @@ import com.intellij.openapi.roots.ModifiableRootModel;
 import com.intellij.pom.java.LanguageLevel;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -60,10 +62,12 @@ import javax.annotation.Nullable;
 import org.jetbrains.kotlin.android.synthetic.AndroidCommandLineProcessor;
 import org.jetbrains.kotlin.cli.common.arguments.CommonCompilerArguments;
 import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments;
+import org.jetbrains.kotlin.config.CompilerSettings;
 import org.jetbrains.kotlin.config.KotlinFacetSettings;
 import org.jetbrains.kotlin.config.LanguageVersion;
 import org.jetbrains.kotlin.idea.compiler.configuration.Kotlin2JvmCompilerArgumentsHolder;
 import org.jetbrains.kotlin.idea.compiler.configuration.KotlinCommonCompilerArgumentsHolder;
+import org.jetbrains.kotlin.idea.compiler.configuration.KotlinCompilerSettings;
 import org.jetbrains.kotlin.idea.configuration.KotlinJavaModuleConfigurator;
 import org.jetbrains.kotlin.idea.configuration.NotificationMessageCollector;
 import org.jetbrains.kotlin.idea.facet.KotlinFacet;
@@ -76,6 +80,8 @@ public class BlazeKotlinSyncPlugin implements BlazeSyncPlugin {
   // set).
   private static final String KOTLIN_PLUGIN_ID = "org.jetbrains.kotlin";
   private static final LanguageVersion DEFAULT_VERSION = LanguageVersion.KOTLIN_1_2;
+  private static final BoolExperiment enabled =
+      new BoolExperiment("blaze.kotlin.sync.setadditonalparameter", true);
 
   @Override
   public Set<LanguageClass> getSupportedLanguagesInWorkspace(WorkspaceType workspaceType) {
@@ -114,8 +120,8 @@ public class BlazeKotlinSyncPlugin implements BlazeSyncPlugin {
    * should catch incorrect usage.
    */
   private static void updateProjectSettings(Project project, BlazeProjectData blazeProjectData) {
-    LanguageVersion languageLevel =
-        getLanguageVersion(findToolchain(blazeProjectData.getTargetMap()));
+    KotlinToolchainIdeInfo kotlinToolchainIdeInfo = findToolchain(blazeProjectData.getTargetMap());
+    LanguageVersion languageLevel = getLanguageVersion(kotlinToolchainIdeInfo);
     String versionString = languageLevel.getVersionString();
     CommonCompilerArguments settings =
         (CommonCompilerArguments)
@@ -135,6 +141,23 @@ public class BlazeKotlinSyncPlugin implements BlazeSyncPlugin {
     }
     if (updated) {
       KotlinCommonCompilerArgumentsHolder.Companion.getInstance(project).setSettings(settings);
+    }
+
+    if (enabled.getValue()) {
+      CompilerSettings compilerSettings =
+          (CompilerSettings)
+              KotlinCompilerSettings.Companion.getInstance(project).getSettings().unfrozen();
+      // Order matters since we have parameter like -jvm-target 1.8 where two parameters must be
+      // aligned in order.
+      // Currently, we list all common compiler flags in settings even though it may be duplicated
+      // with CommonCompilerArguments.languageVersion and K2JVMCompilerArguments.jvmTarget. There
+      // are 2 reasons: 1. they are expected to be identical 2. we do not really use these compiler
+      // arguments when compile kotlin files. They comes from compile result.
+      Set<String> commonFlags =
+          new LinkedHashSet<>(kotlinToolchainIdeInfo.getKotlinCompilerCommonFlags());
+      commonFlags.addAll(Arrays.asList(compilerSettings.getAdditionalArguments().split(" ")));
+      compilerSettings.setAdditionalArguments(String.join(" ", commonFlags));
+      KotlinCompilerSettings.Companion.getInstance(project).setSettings(compilerSettings);
     }
   }
 
